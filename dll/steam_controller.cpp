@@ -48,7 +48,47 @@ void Controller_Action::activate_action_set(ControllerDigitalActionHandle_t acti
     auto map = controller_maps.find(active_set);
     if (map == controller_maps.end()) return;
     this->active_set = active_set;
+    this->active_layers.clear();
     this->active_map = map->second;
+}
+
+void Controller_Action::rebuild_effective_map(std::map<ControllerActionSetHandle_t, struct Controller_Map> &controller_maps) {
+    auto base = controller_maps.find(active_set);
+    if (base == controller_maps.end()) return;
+    active_map = base->second;
+    for (auto layer_handle : active_layers) {
+        auto layer = controller_maps.find(layer_handle);
+        if (layer == controller_maps.end()) continue;
+        for (auto &d : layer->second.active_digital) {
+            active_map.active_digital[d.first] = d.second;
+        }
+        for (auto &a : layer->second.active_analog) {
+            active_map.active_analog[a.first] = a.second;
+        }
+    }
+}
+
+void Controller_Action::activate_action_set_layer(ControllerActionSetHandle_t layer_handle, std::map<ControllerActionSetHandle_t, struct Controller_Map> &controller_maps) {
+    if (controller_maps.find(layer_handle) == controller_maps.end()) return;
+    for (auto h : active_layers) {
+        if (h == layer_handle) return;
+    }
+    if (active_layers.size() >= STEAM_INPUT_MAX_ACTIVE_LAYERS) return;
+    active_layers.push_back(layer_handle);
+    rebuild_effective_map(controller_maps);
+}
+
+void Controller_Action::deactivate_action_set_layer(ControllerActionSetHandle_t layer_handle, std::map<ControllerActionSetHandle_t, struct Controller_Map> &controller_maps) {
+    auto it = std::find(active_layers.begin(), active_layers.end(), layer_handle);
+    if (it == active_layers.end()) return;
+    active_layers.erase(it);
+    rebuild_effective_map(controller_maps);
+}
+
+void Controller_Action::deactivate_all_action_set_layers(std::map<ControllerActionSetHandle_t, struct Controller_Map> &controller_maps) {
+    if (active_layers.empty()) return;
+    active_layers.clear();
+    rebuild_effective_map(controller_maps);
 }
 
 std::set<int> Controller_Action::button_id(ControllerDigitalActionHandle_t handle) {
@@ -223,7 +263,7 @@ Steam_Controller::Steam_Controller(class Settings *settings, class SteamCallResu
     set_handles(settings->controller_settings.action_sets);
     disabled = !settings->controller_settings.enabled && action_handles.empty();
     initialized = false;
-    
+
     this->run_every_runcb->add(&Steam_Controller::steam_run_every_runcb, this);
 }
 
@@ -453,23 +493,66 @@ ControllerActionSetHandle_t Steam_Controller::GetCurrentActionSet( ControllerHan
 
 void Steam_Controller::ActivateActionSetLayer( ControllerHandle_t controllerHandle, ControllerActionSetHandle_t actionSetLayerHandle )
 {
-    PRINT_DEBUG_TODO();
+    PRINT_DEBUG("%llu %llu", controllerHandle, actionSetLayerHandle);
+    if (controllerHandle == STEAM_CONTROLLER_HANDLE_ALL_CONTROLLERS) {
+        for (auto & c: controllers) {
+            c.second.activate_action_set_layer(actionSetLayerHandle, controller_maps);
+        }
+        return;
+    }
+
+    auto controller = controllers.find(controllerHandle);
+    if (controller == controllers.end()) return;
+
+    controller->second.activate_action_set_layer(actionSetLayerHandle, controller_maps);
 }
 
 void Steam_Controller::DeactivateActionSetLayer( ControllerHandle_t controllerHandle, ControllerActionSetHandle_t actionSetLayerHandle )
 {
-    PRINT_DEBUG_TODO();
+    PRINT_DEBUG("%llu %llu", controllerHandle, actionSetLayerHandle);
+    if (controllerHandle == STEAM_CONTROLLER_HANDLE_ALL_CONTROLLERS) {
+        for (auto & c: controllers) {
+            c.second.deactivate_action_set_layer(actionSetLayerHandle, controller_maps);
+        }
+        return;
+    }
+
+    auto controller = controllers.find(controllerHandle);
+    if (controller == controllers.end()) return;
+
+    controller->second.deactivate_action_set_layer(actionSetLayerHandle, controller_maps);
 }
 
 void Steam_Controller::DeactivateAllActionSetLayers( ControllerHandle_t controllerHandle )
 {
-    PRINT_DEBUG_TODO();
+    PRINT_DEBUG("%llu", controllerHandle);
+    if (controllerHandle == STEAM_CONTROLLER_HANDLE_ALL_CONTROLLERS) {
+        for (auto & c: controllers) {
+            c.second.deactivate_all_action_set_layers(controller_maps);
+        }
+        return;
+    }
+
+    auto controller = controllers.find(controllerHandle);
+    if (controller == controllers.end()) return;
+
+    controller->second.deactivate_all_action_set_layers(controller_maps);
 }
 
 int Steam_Controller::GetActiveActionSetLayers( ControllerHandle_t controllerHandle, ControllerActionSetHandle_t *handlesOut )
 {
-    PRINT_DEBUG_TODO();
-    return 0;
+    PRINT_DEBUG("%llu", controllerHandle);
+    auto controller = controllers.find(controllerHandle);
+    if (controller == controllers.end()) return 0;
+
+    auto &layers = controller->second.active_layers;
+    int count = static_cast<int>(layers.size());
+    if (handlesOut) {
+        for (int i = 0; i < count; i++) {
+            handlesOut[i] = layers[i];
+        }
+    }
+    return count;
 }
 
 
@@ -819,7 +902,7 @@ int Steam_Controller::GetAnalogActionOrigins( InputHandle_t inputHandle, InputAc
     return count;
 }
 
-    
+
 void Steam_Controller::StopAnalogActionMomentum( ControllerHandle_t controllerHandle, ControllerAnalogActionHandle_t eAction )
 {
     PRINT_DEBUG("%llu %llu", controllerHandle, eAction);
@@ -865,7 +948,7 @@ void Steam_Controller::TriggerSimpleHapticEvent( InputHandle_t inputHandle, ECon
     PRINT_DEBUG_TODO();
 }
 
-// Tigger a vibration event on supported controllers.  
+// Tigger a vibration event on supported controllers.
 void Steam_Controller::TriggerVibration( ControllerHandle_t controllerHandle, unsigned short usLeftSpeed, unsigned short usRightSpeed )
 {
     PRINT_DEBUG("%hu %hu", usLeftSpeed, usRightSpeed);
@@ -898,7 +981,7 @@ void Steam_Controller::TriggerVibrationExtended( InputHandle_t inputHandle, unsi
     //TODO trigger impulse rumbles
 }
 
-// Set the controller LED color on supported controllers.  
+// Set the controller LED color on supported controllers.
 void Steam_Controller::SetLEDColor( ControllerHandle_t controllerHandle, uint8 nColorR, uint8 nColorG, uint8 nColorB, unsigned int nFlags )
 {
     PRINT_DEBUG_TODO();
@@ -972,7 +1055,7 @@ const char* Steam_Controller::GetStringForAnalogActionName( InputAnalogActionHan
     return "Button String";
 }
 
-// Get a local path to art for on-screen glyph for a particular origin 
+// Get a local path to art for on-screen glyph for a particular origin
 const char* Steam_Controller::GetGlyphForActionOrigin( EControllerActionOrigin eOrigin )
 {
     PRINT_DEBUG("%i", eOrigin);
@@ -1057,7 +1140,7 @@ const char* Steam_Controller::GetGlyphForActionOrigin( EInputActionOrigin eOrigi
     return glyph->second.c_str();
 }
 
-// Get a local path to a PNG file for the provided origin's glyph. 
+// Get a local path to a PNG file for the provided origin's glyph.
 const char* Steam_Controller::GetGlyphPNGForActionOrigin( EInputActionOrigin eOrigin, ESteamInputGlyphSize eSize, uint32 unFlags )
 {
     PRINT_DEBUG_TODO();
@@ -1065,7 +1148,7 @@ const char* Steam_Controller::GetGlyphPNGForActionOrigin( EInputActionOrigin eOr
     return GetGlyphForActionOrigin(eOrigin);
 }
 
-// Get a local path to a SVG file for the provided origin's glyph. 
+// Get a local path to a SVG file for the provided origin's glyph.
 const char* Steam_Controller::GetGlyphSVGForActionOrigin( EInputActionOrigin eOrigin, uint32 unFlags )
 {
     PRINT_DEBUG_TODO();
@@ -1086,7 +1169,7 @@ ESteamInputType Steam_Controller::GetInputTypeForHandle( ControllerHandle_t cont
     PRINT_DEBUG("%llu", controllerHandle);
     auto controller = controllers.find(controllerHandle);
     if (controller == controllers.end()) return k_ESteamInputType_Unknown;
-    
+
     // Playstation
     if (settings->controller_settings.controller_type_override == "PS3") return k_ESteamInputType_PS3Controller;
     if (settings->controller_settings.controller_type_override == "PS4") return k_ESteamInputType_PS4Controller;
@@ -1133,10 +1216,10 @@ EControllerActionOrigin Steam_Controller::TranslateActionOrigin( ESteamInputType
 EInputActionOrigin Steam_Controller::TranslateActionOrigin( ESteamInputType eDestinationInputType, EInputActionOrigin eSourceOrigin )
 {
     PRINT_DEBUG("steaminput destinationinputtype %d sourceorigin %d", eDestinationInputType, eSourceOrigin );
- 
+
     if (eDestinationInputType == k_ESteamInputType_XBox360Controller)
         return eSourceOrigin;
- 
+
     return k_EInputActionOrigin_None;
 }
 
@@ -1158,7 +1241,7 @@ uint32 Steam_Controller::GetRemotePlaySessionID( InputHandle_t inputHandle )
     return 0;
 }
 
-// Get a bitmask of the Steam Input Configuration types opted in for the current session. Returns ESteamInputConfigurationEnableType values.?	
+// Get a bitmask of the Steam Input Configuration types opted in for the current session. Returns ESteamInputConfigurationEnableType values.?
 // Note: user can override the settings from the Steamworks Partner site so the returned values may not exactly match your default configuration
 uint16 Steam_Controller::GetSessionInputConfigurationSettings()
 {
